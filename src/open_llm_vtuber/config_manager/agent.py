@@ -27,7 +27,11 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
         "deepseek_llm",
         "groq_llm",
         "mistral_llm",
+        "routing_llm",
     ] = Field(..., alias="llm_provider")
+
+    primary_llm_provider: Optional[str] = Field(None, alias="primary_llm_provider")
+    secondary_llm_provider: Optional[str] = Field(None, alias="secondary_llm_provider")
 
     faster_first_response: Optional[bool] = Field(True, alias="faster_first_response")
     segment_method: Literal["regex", "pysbd"] = Field("pysbd", alias="segment_method")

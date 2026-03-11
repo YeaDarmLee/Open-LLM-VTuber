@@ -106,51 +106,27 @@ class ServiceContext:
         self.json_detector = None
         self.mcp_prompt = ""
 
-        if use_mcpp and enabled_servers:
+        if use_mcpp:
+            # Initialize required MCP infrastructure even if list is empty,
+            # to support internal tools properly.
+            logger.info(f"Initializing MCP components (Servers: {enabled_servers})")
+            
             # 1. Initialize ServerRegistry
-            self.mcp_server_registery = ServerRegistry()
-            logger.info("ServerRegistry initialized or referenced.")
+            self.mcp_server_registery = self.mcp_server_registery or ServerRegistry()
 
-            # 2. Use ToolAdapter to get the MCP prompt and tools
-            if not self.tool_adapter:
-                logger.error(
-                    "ToolAdapter not initialized before calling _init_mcp_components."
-                )
-                self.mcp_prompt = "[Error: ToolAdapter not initialized]"
-                return  # Exit if ToolAdapter is mandatory and not initialized
+            # 2. Add enabled servers to registry
+            for server_name in enabled_servers:
+                self.mcp_server_registery.add_server(server_name)
 
+            # 3. Initialize ToolAdapter and generate MCP prompt
+            self.tool_adapter = self.tool_adapter or ToolAdapter(self.mcp_server_registery)
             try:
-                (
-                    mcp_prompt_string,
-                    openai_tools,
-                    claude_tools,
-                ) = await self.tool_adapter.get_tools(enabled_servers)
-                # Store the generated prompt string
-                self.mcp_prompt = mcp_prompt_string
-                logger.info(
-                    f"Dynamically generated MCP prompt string (length: {len(self.mcp_prompt)})."
-                )
-                logger.info(
-                    f"Dynamically formatted tools - OpenAI: {len(openai_tools)}, Claude: {len(claude_tools)}."
-                )
-
-                # 3. Initialize ToolManager with the fetched formatted tools
-
-                _, raw_tools_dict = await self.tool_adapter.get_server_and_tool_info(
-                    enabled_servers
-                )
-                self.tool_manager = ToolManager(
-                    formatted_tools_openai=openai_tools,
-                    formatted_tools_claude=claude_tools,
-                    initial_tools_dict=raw_tools_dict,
-                )
-                logger.info("ToolManager initialized with dynamically fetched tools.")
-
+                self.tool_manager = await self.tool_adapter.construct_tool_manager()
+                self.mcp_prompt = await self.tool_adapter.construct_mcp_prompt()
             except Exception as e:
                 logger.error(
                     f"Failed during dynamic MCP tool construction: {e}", exc_info=True
                 )
-                # Ensure dependent components are not created if construction fails
                 self.tool_manager = None
                 self.mcp_prompt = "[Error constructing MCP tools/prompt]"
 
@@ -161,30 +137,18 @@ class ServiceContext:
                 )
                 logger.info("MCPClient initialized for this session.")
             else:
-                logger.error(
-                    "MCP enabled but ServerRegistry not available. MCPClient not created."
-                )
-                self.mcp_client = None  # Ensure it's None
+                self.mcp_client = None
 
             # 5. Initialize ToolExecutor
-            if self.mcp_client and self.tool_manager:
+            if self.tool_manager:
                 self.tool_executor = ToolExecutor(self.mcp_client, self.tool_manager)
                 logger.info("ToolExecutor initialized for this session.")
             else:
-                logger.warning(
-                    "MCPClient or ToolManager not available. ToolExecutor not created."
-                )
-                self.tool_executor = None  # Ensure it's None
+                self.tool_executor = None
 
-            logger.info("StreamJSONDetector initialized for this session.")
-
-        elif use_mcpp and not enabled_servers:
-            logger.warning(
-                "use_mcpp is True, but mcp_enabled_servers list is empty. MCP components not initialized."
-            )
         else:
             logger.debug(
-                "MCP components not initialized (use_mcpp is False or no enabled servers)."
+                "MCP components not initialized (use_mcpp is False)."
             )
 
     async def close(self):
@@ -262,6 +226,27 @@ class ServiceContext:
 
         if not self.character_config:
             self.character_config = config.character_config
+
+        # Resolve persona_prompt placeholder if needed
+        if (
+            self.character_config
+            and self.character_config.persona_prompt.startswith("See ")
+        ):
+            from .config_manager.utils import read_yaml
+
+            path = self.character_config.persona_prompt[4:].strip()
+            if os.path.exists(path):
+                logger.info(f"Resolving persona_prompt from path: {path}")
+                yaml_data = read_yaml(path)
+                # Try top-level first, then nested under character_config
+                persona_content = yaml_data.get("persona_prompt") or yaml_data.get("character_config", {}).get("persona_prompt")
+                
+                if persona_content:
+                    self.character_config.persona_prompt = persona_content
+                else:
+                    logger.warning(f"Could not find persona_prompt in {path}. YAML keys: {list(yaml_data.keys())}")
+            else:
+                logger.warning(f"persona_prompt path does not exist: {path}")
 
         # update all sub-configs
 

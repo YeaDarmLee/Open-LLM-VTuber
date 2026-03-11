@@ -6,6 +6,7 @@ from ..live2d_model import Live2dModel
 from ..config_manager import TTSPreprocessorConfig
 from ..utils.sentence_divider import SentenceDivider
 from ..utils.sentence_divider import SentenceWithTags, TagState
+from ..utils.korean_cleaner import KoreanCleaner
 from loguru import logger
 
 
@@ -201,9 +202,17 @@ def tts_filter(
                     logger.debug(f"[{display.name}] display: {display.text}")
                     logger.debug(f"[{display.name}] tts: {tts}")
 
+                    # Apply Korean post-processing
+                    cleaned_display = KoreanCleaner.clean(display.text)
+                    cleaned_tts = KoreanCleaner.clean(tts)
+
                     yield SentenceOutput(
-                        display_text=display,
-                        tts_text=tts,
+                        display_text=DisplayText(
+                            text=cleaned_display,
+                            name=display.name,
+                            avatar=display.avatar,
+                        ),
+                        tts_text=cleaned_tts,
                         actions=actions,
                     )
                 elif isinstance(item, dict):
@@ -211,6 +220,69 @@ def tts_filter(
                     yield item
                 else:
                     logger.warning(f"tts_filter received unexpected type: {type(item)}")
+
+        return wrapper
+
+    return decorator
+
+
+def chunk_grouper(max_chunks: int = 3):
+    """
+    Groups sentence outputs into a maximum number of chunks.
+    Sends first 2 sentences immediately, then groups the rest into 1 last chunk.
+    This balances latency and TTS overhead.
+    """
+
+    def decorator(
+        func: Callable[..., AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]]
+    ) -> Callable[..., AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]]:
+        @wraps(func)
+        async def wrapper(
+            *args, **kwargs
+        ) -> AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]:
+            stream = func(*args, **kwargs)
+            chunk_count = 0
+            remaining_sentences = []
+
+            async for item in stream:
+                if isinstance(item, SentenceOutput):
+                    if chunk_count < max_chunks - 1:
+                        # Yield immediately for first (max_chunks - 1) chunks
+                        yield item
+                        chunk_count += 1
+                    else:
+                        # Accumulate the rest
+                        remaining_sentences.append(item)
+                elif isinstance(item, dict):
+                    # Pass through dicts (events) immediately
+                    yield item
+                else:
+                    yield item
+
+            if remaining_sentences:
+                # Group all remaining into the last chunk
+                merged_display = " ".join(
+                    [s.display_text.text for s in remaining_sentences]
+                )
+                merged_tts = " ".join([s.tts_text for s in remaining_sentences])
+
+                # Combine expressions (removing duplicates)
+                merged_expressions = []
+                for s in remaining_sentences:
+                    if s.actions.expressions:
+                        merged_expressions.extend(s.actions.expressions)
+
+                # Use the first sentence's metadata
+                first = remaining_sentences[0]
+                yield SentenceOutput(
+                    display_text=DisplayText(
+                        text=merged_display,
+                        name=first.display_text.name,
+                        avatar=first.display_text.avatar,
+                    ),
+                    tts_text=merged_tts,
+                    actions=Actions(expressions=list(set(merged_expressions))),
+                )
 
         return wrapper
 

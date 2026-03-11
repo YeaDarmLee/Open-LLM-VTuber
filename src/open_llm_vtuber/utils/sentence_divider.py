@@ -130,14 +130,34 @@ def comma_splitter(text: str) -> Tuple[str, str]:
     Returns:
         Tuple[str, str]: (split text with comma, remaining text)
     """
-    if not text:
-        return [], ""
+    # If the text is very short (e.g. "물론이야, 민수,"), don't split yet
+    if len(text) < 20: 
+        return text, ""
 
-    for comma in COMMAS:
-        if comma in text:
-            split_text = text.split(comma, 1)
-            # Return first part with the comma
-            return split_text[0].strip() + comma, split_text[1].strip()
+    # Pattern to match a comma NOT surrounded by digits (e.g., skips "10,000")
+    # Matches a comma that doesn't have a digit before and after it.
+    
+    # Let's find all commas and pick the first one that isn't part of a number
+    parts = re.split(r'(,)', text)
+    if len(parts) <= 1:
+        return text, ""
+        
+    for i in range(len(parts)):
+        if parts[i] == ",":
+            # Check if it's between digits
+            is_numerical = False
+            if i > 0 and i < len(parts) - 1:
+                prev_part = parts[i-1]
+                next_part = parts[i+1]
+                if prev_part and next_part and prev_part[-1:].isdigit() and next_part[:1].isdigit():
+                    is_numerical = True
+            
+            if not is_numerical:
+                # This is our split point
+                processed_text = "".join(parts[:i]) + ","
+                remaining_text = "".join(parts[i+1:])
+                return processed_text.strip(), remaining_text.strip()
+    
     return text, ""
 
 

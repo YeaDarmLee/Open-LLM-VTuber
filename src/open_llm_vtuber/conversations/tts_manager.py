@@ -171,6 +171,22 @@ class TTSTaskManager:
             file_name_no_ext=f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}",
         )
 
+    async def wait_until_done(self) -> None:
+        """Wait until all queued payloads are processed and sent to the WebSocket."""
+        # Wait for all TTS generation tasks to complete
+        if self.task_list:
+            await asyncio.gather(*self.task_list)
+
+        # Wait for the payload queue to be empty and sent
+        while not self._payload_queue.empty() or self._next_sequence_to_send < self._sequence_counter:
+            await asyncio.sleep(0.05)
+            # If the sender task is dead but we have more to send, something is wrong
+            if self._sender_task and self._sender_task.done() and self._next_sequence_to_send < self._sequence_counter:
+                logger.error("TTS sender task stopped unexpectedly while payloads were still in queue.")
+                break
+        
+        logger.debug("TTSTaskManager: All payloads sent.")
+
     def clear(self) -> None:
         """Clear all pending tasks and reset state"""
         self.task_list.clear()

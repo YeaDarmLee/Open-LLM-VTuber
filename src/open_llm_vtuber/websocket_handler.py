@@ -157,6 +157,7 @@ class WebSocketHandler:
             json.dumps({"type": "full-text", "text": "Connection established"})
         )
 
+        logger.debug(f"Sending model_info to client: {session_service_context.live2d_model.model_info}")
         await websocket.send_text(
             json.dumps(
                 {
@@ -365,6 +366,7 @@ class WebSocketHandler:
                     }
                 )
             )
+
 
     async def _handle_interrupt(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

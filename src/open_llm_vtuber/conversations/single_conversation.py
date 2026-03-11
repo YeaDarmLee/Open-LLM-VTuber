@@ -90,13 +90,13 @@ async def process_single_conversation(
             agent_output_stream = context.agent_engine.chat(batch_input)
 
             async for output_item in agent_output_stream:
-                if (
-                    isinstance(output_item, dict)
-                    and output_item.get("type") == "tool_call_status"
-                ):
-                    # Handle tool status event: send WebSocket message
+                if isinstance(output_item, dict):
+                    # Handle all dictionary items (tool status, research logs, etc.)
+                    if "type" not in output_item:
+                        output_item["type"] = "tool_call_status"
+                    
                     output_item["name"] = context.character_config.character_name
-                    logger.debug(f"Sending tool status update: {output_item}")
+                    logger.debug(f"Piping agent dictionary update to WebSocket: {output_item}")
 
                     await websocket_send(json.dumps(output_item))
 
@@ -139,7 +139,9 @@ async def process_single_conversation(
 
         # Wait for any pending TTS tasks
         if tts_manager.task_list:
-            await asyncio.gather(*tts_manager.task_list)
+            # Wait for ALL audio payloads to be sent to WebSocket before sending status complete
+            # This prevents concurrent writes to WebSocket (AssertionError)
+            await tts_manager.wait_until_done()
             await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
         await finalize_conversation_turn(

@@ -31,6 +31,7 @@ class LLMFactory:
             or llm_provider == "groq_llm"
             or llm_provider == "mistral_llm"
             or llm_provider == "lmstudio_llm"
+            or llm_provider == "openai_mini_llm"
         ):
             return OpenAICompatibleLLM(
                 model=kwargs.get("model"),
@@ -74,6 +75,24 @@ class LLMFactory:
                 model=kwargs.get("model"),
                 llm_api_key=kwargs.get("llm_api_key"),
             )
+        elif llm_provider == "routing_llm":
+            from .stateless_llm.routing_llm import RoutingLLM
+
+            primary_provider = kwargs.get("primary_provider")
+            secondary_provider = kwargs.get("secondary_provider")
+            primary_config = kwargs.get("primary_config", {})
+            secondary_config = kwargs.get("secondary_config", {})
+
+            # Ensure system prompt is passed if needed
+            if "system_prompt" not in primary_config:
+                primary_config["system_prompt"] = kwargs.get("system_prompt")
+            if "system_prompt" not in secondary_config:
+                secondary_config["system_prompt"] = kwargs.get("system_prompt")
+
+            primary_llm = LLMFactory.create_llm(primary_provider, **primary_config)
+            secondary_llm = LLMFactory.create_llm(secondary_provider, **secondary_config)
+
+            return RoutingLLM(primary_llm, secondary_llm)
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}")
 

@@ -45,20 +45,46 @@ class AgentFactory:
                 raise ValueError("LLM provider not specified for basic memory agent")
 
             # Get the LLM config for this provider
-            llm_config: dict = llm_configs.get(llm_provider)
-            interrupt_method: Literal["system", "user"] = llm_config.pop(
-                "interrupt_method", "user"
-            )
+            llm_config = {}
+            interrupt_method: Literal["system", "user"] = "user"
 
-            if not llm_config:
-                raise ValueError(
-                    f"Configuration not found for LLM provider: {llm_provider}"
-                )
+            if llm_provider != "routing_llm":
+                llm_config = llm_configs.get(llm_provider)
+                if not llm_config:
+                    raise ValueError(
+                        f"Configuration not found for LLM provider: {llm_provider}"
+                    )
+                llm_config = llm_config.copy()
+                interrupt_method = llm_config.pop("interrupt_method", "user")
+            else:
+                # For routing_llm, determine interrupt_method from primary provider
+                primary_provider = basic_memory_settings.get("primary_llm_provider")
+                primary_config_temp = llm_configs.get(primary_provider, {})
+                interrupt_method = primary_config_temp.get("interrupt_method", "user")
 
             # Create the stateless LLM
-            llm = StatelessLLMFactory.create_llm(
-                llm_provider=llm_provider, system_prompt=system_prompt, **llm_config
-            )
+            if llm_provider == "routing_llm":
+                primary_provider = basic_memory_settings.get("primary_llm_provider")
+                secondary_provider = basic_memory_settings.get("secondary_llm_provider")
+                primary_config = llm_configs.get(primary_provider, {}).copy()
+                secondary_config = llm_configs.get(secondary_provider, {}).copy()
+
+                # Remove interrupt_method if present in nested configs
+                primary_config.pop("interrupt_method", None)
+                secondary_config.pop("interrupt_method", None)
+
+                llm = StatelessLLMFactory.create_llm(
+                    llm_provider=llm_provider,
+                    primary_provider=primary_provider,
+                    secondary_provider=secondary_provider,
+                    primary_config=primary_config,
+                    secondary_config=secondary_config,
+                    system_prompt=system_prompt,
+                )
+            else:
+                llm = StatelessLLMFactory.create_llm(
+                    llm_provider=llm_provider, system_prompt=system_prompt, **llm_config
+                )
 
             tool_prompts = kwargs.get("system_config", {}).get("tool_prompts", {})
 

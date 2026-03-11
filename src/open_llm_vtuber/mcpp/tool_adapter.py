@@ -230,3 +230,22 @@ class ToolAdapter:
         openai_tools, claude_tools = self.format_tools_for_api(formatted_tools_dict)
         logger.info("MC: Dynamic tool construction complete.")
         return mcp_prompt_string, openai_tools, claude_tools
+
+    async def construct_tool_manager(self, enabled_servers: List[str] = None) -> "ToolManager":
+        """Helper to construct a ToolManager directly."""
+        enabled_servers = enabled_servers or []
+        _, openai_tools, claude_tools = await self.get_tools(enabled_servers)
+        _, raw_tools_dict = await self.get_server_and_tool_info(enabled_servers)
+        
+        from .tool_manager import ToolManager
+        return ToolManager(
+            formatted_tools_openai=openai_tools,
+            formatted_tools_claude=claude_tools,
+            initial_tools_dict=raw_tools_dict,
+        )
+
+    async def construct_mcp_prompt(self, enabled_servers: List[str] = None) -> str:
+        """Helper to construct MCP prompt string directly."""
+        enabled_servers = enabled_servers or []
+        mcp_prompt_string, _, _ = await self.get_tools(enabled_servers)
+        return mcp_prompt_string

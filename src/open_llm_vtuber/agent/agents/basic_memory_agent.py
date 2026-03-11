@@ -20,6 +20,7 @@ from ..transformers import (
     actions_extractor,
     tts_filter,
     display_processor,
+    chunk_grouper,
 )
 from ...config_manager import TTSPreprocessorConfig
 from ..input_types import BatchInput, TextSource
@@ -28,6 +29,11 @@ from ...mcpp.tool_manager import ToolManager
 from ...mcpp.json_detector import StreamJSONDetector
 from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
+import re
+from ...viewer_manager import ViewerManager
+from ...research_manager import ResearchManager
+from ..internal_tools import get_internal_tool_definitions
+import json
 
 
 class BasicMemoryAgent(AgentInterface):
@@ -68,45 +74,43 @@ class BasicMemoryAgent(AgentInterface):
         self._mcp_prompt_string = mcp_prompt_string
         self._json_detector = StreamJSONDetector()
 
+        # NULL_AI Engines
+        self.viewer_manager = ViewerManager()
+        self.research_manager = ResearchManager()
+
         self._formatted_tools_openai = []
         self._formatted_tools_claude = []
+        
+        # Register Internal Tools
+        internal_tool_defs = get_internal_tool_definitions()
+        self._formatted_tools_openai.extend(internal_tool_defs)
+        self._formatted_tools_claude.extend(internal_tool_defs)
+
         if self._tool_manager:
-            self._formatted_tools_openai = self._tool_manager.get_formatted_tools(
+            self._formatted_tools_openai.extend(self._tool_manager.get_formatted_tools(
                 "OpenAI"
-            )
-            self._formatted_tools_claude = self._tool_manager.get_formatted_tools(
+            ))
+            self._formatted_tools_claude.extend(self._tool_manager.get_formatted_tools(
                 "Claude"
-            )
+            ))
             logger.debug(
-                f"Agent received pre-formatted tools - OpenAI: {len(self._formatted_tools_openai)}, Claude: {len(self._formatted_tools_claude)}"
+                f"Agent received {len(internal_tool_defs)} internal tools + MCP tools - OpenAI: {len(self._formatted_tools_openai)}, Claude: {len(self._formatted_tools_claude)}"
             )
         else:
             logger.debug(
-                "ToolManager not provided, agent will not have pre-formatted tools."
+                f"ToolManager not provided, agent initialized with {len(internal_tool_defs)} internal tools only."
             )
 
         self._set_llm(llm)
         self.set_system(system if system else self._system)
 
-        if self._use_mcpp and not all(
-            [
-                self._tool_manager,
-                self._tool_executor,
-                self._json_detector,
-            ]
-        ):
+        if self._use_mcpp and not self._tool_manager:
             logger.warning(
-                "use_mcpp is True, but some MCP components are missing in the agent. Tool calling might not work as expected."
+                "use_mcpp is True, but ToolManager is missing in the agent. Tool calling will be disabled."
             )
-        elif not self._use_mcpp and any(
-            [
-                self._tool_manager,
-                self._tool_executor,
-                self._json_detector,
-            ]
-        ):
+        elif not self._use_mcpp and self._tool_manager:
             logger.warning(
-                "use_mcpp is False, but some MCP components were passed to the agent."
+                "use_mcpp is False, but ToolManager was passed to the agent."
             )
 
         logger.info("BasicMemoryAgent initialized.")
@@ -237,7 +241,27 @@ class BasicMemoryAgent(AgentInterface):
         if input_data.images:
             message_parts.append("\n[User has also provided images]")
 
-        return "\n".join(message_parts).strip()
+        text_content = "\n".join(message_parts).strip()
+
+        # Inject Viewer Context if nickname is present
+        nickname_match = re.search(r"\[nickname:([^\]]+)\]", text_content)
+        if nickname_match:
+            nickname = nickname_match.group(1)
+            # Update viewer stats (visit)
+            self.viewer_manager.update_viewer(nickname)
+            
+            # Decide context mode based on message content
+            context_mode = 'short'
+            expansion_keywords = ["기억", "누구", "나에 대해", "패턴", "분석", "데이터"]
+            recent_logs = []
+            if any(kw in text_content for kw in expansion_keywords):
+                context_mode = 'full'
+                recent_logs = self.research_manager.get_recent_logs(nickname, limit=3)
+            
+            viewer_context = self.viewer_manager.get_viewer_context(nickname, mode=context_mode, recent_logs=recent_logs)
+            text_content = f"{viewer_context}\n\n{text_content}"
+
+        return text_content
 
     def _to_messages(self, input_data: BatchInput) -> List[Dict[str, Any]]:
         """Prepare messages for LLM API call."""
@@ -366,34 +390,44 @@ class BasicMemoryAgent(AgentInterface):
                         self._add_message(assistant_text_for_memory, "assistant")
 
                 tool_results_for_llm = []
-                if not self._tool_executor:
-                    logger.error(
-                        "Claude Tool interaction requested but ToolExecutor is not available."
-                    )
-                    yield "[Error: ToolExecutor not configured]"
-                    return
+                
+                # Split internal and external tool calls
+                internal_calls = [tc for tc in pending_tool_calls if self._is_internal_tool(tc["name"])]
+                external_calls = [tc for tc in pending_tool_calls if not self._is_internal_tool(tc["name"])]
+                
+                # Execute Internal Tools
+                for tc in internal_calls:
+                    res_content = await self._execute_internal_tool(tc["name"], tc.get("input", {}))
+                    tool_results_for_llm.append({
+                        "role": "tool",
+                        "tool_use_id": tc["id"],
+                        "content": res_content
+                    })
 
-                tool_executor_iterator = self._tool_executor.execute_tools(
-                    tool_calls=pending_tool_calls,
-                    caller_mode="Claude",
-                )
-                try:
-                    while True:
-                        update = await anext(tool_executor_iterator)
-                        if update.get("type") == "final_tool_results":
-                            tool_results_for_llm = update.get("results", [])
-                            break
-                        else:
-                            yield update
-                except StopAsyncIteration:
-                    logger.warning(
-                        "Tool executor finished without final results marker."
+                # Execute External Tools
+                if external_calls:
+                    if not self._tool_executor:
+                        logger.error("ToolExecutor not available for external tools.")
+                        yield "[Error: ToolExecutor not configured]"
+                        return
+                    
+                    tool_executor_iterator = self._tool_executor.execute_tools(
+                        tool_calls=external_calls,
+                        caller_mode="Claude",
                     )
+                    try:
+                        while True:
+                            update = await anext(tool_executor_iterator)
+                            if update.get("type") == "final_tool_results":
+                                tool_results_for_llm.extend(update.get("results", []))
+                                break
+                            else:
+                                yield update
+                    except StopAsyncIteration:
+                        logger.warning("Tool executor finished without results.")
 
                 if tool_results_for_llm:
                     messages.append({"role": "user", "content": tool_results_for_llm})
-
-                # stop_reason = None
                 continue
             else:
                 if current_turn_text:
@@ -545,29 +579,58 @@ class BasicMemoryAgent(AgentInterface):
                     self._add_message(current_turn_text, "assistant")
 
                 tool_results_for_llm = []
-                if not self._tool_executor:
-                    logger.error(
-                        "OpenAI Tool interaction requested but ToolExecutor/MCPClient is not available."
-                    )
-                    yield "[Error: ToolExecutor/MCPClient not configured for OpenAI mode]"
-                    continue
-
-                tool_executor_iterator = self._tool_executor.execute_tools(
-                    tool_calls=pending_tool_calls,
-                    caller_mode="OpenAI",
-                )
-                try:
-                    while True:
-                        update = await anext(tool_executor_iterator)
-                        if update.get("type") == "final_tool_results":
-                            tool_results_for_llm = update.get("results", [])
-                            break
+                
+                # Split internal and external tool calls
+                internal_calls = []
+                external_calls = []
+                
+                for tc in pending_tool_calls:
+                    try:
+                        tool_name = tc.function.name
+                        if self._is_internal_tool(tool_name):
+                            internal_calls.append(tc)
                         else:
-                            yield update
-                except StopAsyncIteration:
-                    logger.warning(
-                        "OpenAI tool executor finished without final results marker."
+                            external_calls.append(tc)
+                    except AttributeError as e:
+                        logger.error(f"Failed to access tool function name: {e}. Payload: {tc}")
+
+                # Execute Internal Tools
+                for tc in internal_calls:
+                    args = {}
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse tool arguments for {tc.function.name}: {e}")
+                    
+                    logger.info(f"Executing Internal Tool: {tc.function.name} ID: {tc.id}")
+                    res_content = await self._execute_internal_tool(tc.function.name, args)
+                    tool_results_for_llm.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": res_content
+                    })
+
+                # Execute External Tools
+                if external_calls:
+                    if not self._tool_executor:
+                        logger.error("ToolExecutor not available for external tools.")
+                        yield "[Error: ToolExecutor not configured]"
+                        continue
+                    
+                    tool_executor_iterator = self._tool_executor.execute_tools(
+                        tool_calls=external_calls,
+                        caller_mode="OpenAI",
                     )
+                    try:
+                        while True:
+                            update = await anext(tool_executor_iterator)
+                            if update.get("type") == "final_tool_results":
+                                tool_results_for_llm.extend(update.get("results", []))
+                                break
+                            else:
+                                yield update
+                    except StopAsyncIteration:
+                        logger.warning("OpenAI tool executor finished without results.")
 
                 if tool_results_for_llm:
                     messages.extend(tool_results_for_llm)
@@ -583,6 +646,7 @@ class BasicMemoryAgent(AgentInterface):
     ) -> Callable[[BatchInput], AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]]:
         """Create the chat pipeline function."""
 
+        @chunk_grouper(max_chunks=3)
         @tts_filter(self._tts_preprocessor_config)
         @display_processor()
         @actions_extractor(self._live2d_model)
@@ -603,7 +667,7 @@ class BasicMemoryAgent(AgentInterface):
             tool_mode = None
             llm_supports_native_tools = False
 
-            if self._use_mcpp and self._tool_manager:
+            if self._use_mcpp:
                 tools = None
                 if isinstance(self._llm, ClaudeAsyncLLM):
                     tool_mode = "Claude"
@@ -613,14 +677,14 @@ class BasicMemoryAgent(AgentInterface):
                     tool_mode = "OpenAI"
                     tools = self._formatted_tools_openai
                     llm_supports_native_tools = True
+                elif type(self._llm).__name__ == "RoutingLLM":
+                    # RoutingLLM wraps OpenAI compatible models
+                    tool_mode = "OpenAI"
+                    tools = self._formatted_tools_openai
+                    llm_supports_native_tools = True
                 else:
                     logger.warning(
                         f"LLM type {type(self._llm)} not explicitly handled for tool mode determination."
-                    )
-
-                if llm_supports_native_tools and not tools:
-                    logger.warning(
-                        f"No tools available/formatted for '{tool_mode}' mode, despite MCP being enabled."
                     )
 
             if self._use_mcpp and tool_mode == "Claude":
@@ -641,23 +705,25 @@ class BasicMemoryAgent(AgentInterface):
                 ):
                     yield output
                 return
-            else:
-                logger.info("Starting simple chat completion.")
-                token_stream = self._llm.chat_completion(messages, self._system)
-                complete_response = ""
-                async for event in token_stream:
-                    text_chunk = ""
-                    if isinstance(event, dict) and event.get("type") == "text_delta":
-                        text_chunk = event.get("text", "")
-                    elif isinstance(event, str):
-                        text_chunk = event
-                    else:
-                        continue
-                    if text_chunk:
-                        yield text_chunk
-                        complete_response += text_chunk
-                if complete_response:
-                    self._add_message(complete_response, "assistant")
+
+            # Default simple chat if MCPP is disabled or not handled above
+            logger.info("Starting simple chat completion.")
+            
+            token_stream = self._llm.chat_completion(messages, self._system)
+            complete_response = ""
+            async for event in token_stream:
+                text_chunk = ""
+                if isinstance(event, dict) and event.get("type") == "text_delta":
+                    text_chunk = event.get("text", "")
+                elif isinstance(event, str):
+                    text_chunk = event
+                else:
+                    continue
+                if text_chunk:
+                    yield text_chunk
+                    complete_response += text_chunk
+            if complete_response:
+                self._add_message(complete_response, "assistant")
 
         return chat_with_memory
 
@@ -700,3 +766,43 @@ class BasicMemoryAgent(AgentInterface):
             logger.error(f"Missing formatting key in group conversation prompt: {e}")
         except Exception as e:
             logger.error(f"Failed to load group conversation prompt: {e}")
+
+    def _is_internal_tool(self, tool_name: str) -> bool:
+        """Check if a tool is an internal NULL_AI tool."""
+        return tool_name in ["save_research_log", "add_viewer_note", "add_viewer_tag"]
+
+    async def _execute_internal_tool(self, name: str, args: Dict[str, Any]) -> str:
+        """Execute an internal tool and return the result string."""
+        logger.info(f"Executing internal tool: {name} with args: {args}")
+        try:
+            if name == "save_research_log":
+                return self.save_research_log(**args)
+            elif name == "add_viewer_note":
+                return self.add_viewer_note(**args)
+            elif name == "add_viewer_tag":
+                return self.add_viewer_tag(**args)
+        except Exception as e:
+            logger.error(f"Internal tool error ({name}): {e}")
+            return f"Error: {e}"
+        return f"Unknown internal tool: {name}"
+
+    def save_research_log(self, viewer: str, observation: str, category: str = "behavior_pattern", confidence: str = "medium") -> str:
+        """
+        [TOOL] Save a structured research log about a viewer.
+        """
+        self.research_manager.save_log(viewer, observation, category, confidence)
+        return f"Research log saved: viewer={viewer} category={category} confidence={confidence}"
+
+    def add_viewer_note(self, nickname: str, note: str) -> str:
+        """
+        [TOOL] Add a persistent note about a viewer.
+        """
+        self.viewer_manager.add_note(nickname, note)
+        return f"Note added for {nickname}."
+
+    def add_viewer_tag(self, nickname: str, tag: str) -> str:
+        """
+        [TOOL] Add a specific tag/trait to a viewer.
+        """
+        self.viewer_manager.add_tag(nickname, tag)
+        return f"Tag '{tag}' added for {nickname}."
