@@ -259,7 +259,7 @@ class BasicMemoryAgent(AgentInterface):
                 recent_logs = self.research_manager.get_recent_logs(nickname, limit=3)
             
             viewer_context = self.viewer_manager.get_viewer_context(nickname, mode=context_mode, recent_logs=recent_logs)
-            text_content = f"{viewer_context}\n\n{text_content}"
+            text_content = text_content
 
         return text_content
 

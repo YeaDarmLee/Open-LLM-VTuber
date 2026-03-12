@@ -301,6 +301,8 @@ character_config:
       # 查看文档：https://github.com/rany2/edge-tts
       # 使用 `edge-tts --list-voices` 列出所有可用语音
       voice: zh-CN-XiaoxiaoNeural # 'en-US-AvaMultilingualNeural' #'zh-CN-XiaoxiaoNeural' # 'ja-JP-NanamiNeural'
+      pitch: '+0Hz' # 音高调整 (例如: +10Hz, -5Hz)
+      rate: '+0%' # 语速调整 (例如: +10%, -5%)
 
     # pyttsx3_tts 没有任何配置。
 

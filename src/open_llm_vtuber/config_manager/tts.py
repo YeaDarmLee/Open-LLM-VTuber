@@ -151,12 +151,16 @@ class EdgeTTSConfig(I18nMixin):
     """Configuration for Edge TTS."""
 
     voice: str = Field(..., alias="voice")
+    pitch: str = Field(default="+0Hz", alias="pitch")
+    rate: str = Field(default="+0%", alias="rate")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "voice": Description(
             en="Voice name to use for Edge TTS (use 'edge-tts --list-voices' to list available voices)",
             zh="Edge TTS 使用的语音名称（使用 'edge-tts --list-voices' 列出可用语音）",
         ),
+        "pitch": Description(en="Pitch adjustment (e.g., +10Hz, -5Hz)", zh="音高调整（如 +10Hz, -5Hz）"),
+        "rate": Description(en="Speaking rate adjustment (e.g., +10%, -5%)", zh="语速调整（如 +10%, -5%）"),
     }
 
 

@@ -14,8 +14,15 @@ sys.path.append(current_dir)
 
 
 class TTSEngine(TTSInterface):
-    def __init__(self, voice="en-US-AvaMultilingualNeural"):
+    def __init__(
+        self,
+        voice="en-US-AvaMultilingualNeural",
+        pitch: str = "+0Hz",
+        rate: str = "+0%",
+    ):
         self.voice = voice
+        self.pitch = pitch
+        self.rate = rate
 
         self.temp_audio_file = "temp"
         self.file_extension = "mp3"
@@ -40,7 +47,9 @@ class TTSEngine(TTSInterface):
         file_name = self.generate_cache_file_name(file_name_no_ext, self.file_extension)
 
         try:
-            communicate = edge_tts.Communicate(text, self.voice)
+            communicate = edge_tts.Communicate(
+                text, self.voice, pitch=self.pitch, rate=self.rate
+            )
             communicate.save_sync(file_name)
         except Exception as e:
             logger.critical(f"\nError: edge-tts unable to generate audio: {e}")
