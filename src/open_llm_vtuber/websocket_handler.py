@@ -27,6 +27,8 @@ from .conversations.conversation_handler import (
     handle_group_interrupt,
     handle_individual_interrupt,
 )
+from .events.event_router import event_router
+from .scheduler.idle_scheduler import IdleScheduler
 
 
 class MessageType(Enum):
@@ -43,6 +45,7 @@ class MessageType(Enum):
     CONFIG = ["fetch-configs", "switch-config"]
     CONTROL = ["interrupt-signal", "audio-play-start"]
     DATA = ["mic-audio-data"]
+    EVENT = ["donation"]
 
 
 class WSMessage(TypedDict, total=False):
@@ -69,6 +72,7 @@ class WebSocketHandler:
         self.current_conversation_tasks: Dict[str, Optional[asyncio.Task]] = {}
         self.default_context_cache = default_context_cache
         self.received_data_buffers: Dict[str, np.ndarray] = {}
+        self.idle_schedulers: Dict[str, IdleScheduler] = {}
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -95,6 +99,7 @@ class WebSocketHandler:
             "audio-play-start": self._handle_audio_play_start,
             "request-init-config": self._handle_init_config_request,
             "heartbeat": self._handle_heartbeat,
+            "donation": self._handle_event_trigger,
         }
 
     async def handle_new_connection(
@@ -142,6 +147,13 @@ class WebSocketHandler:
         self.client_connections[client_uid] = websocket
         self.client_contexts[client_uid] = session_service_context
         self.received_data_buffers[client_uid] = np.array([])
+        
+        # Start idle scheduler
+        self.idle_schedulers[client_uid] = IdleScheduler(
+            config=session_service_context.character_config.idle_talk_config,
+            trigger_callback=lambda: self._trigger_idle_event(websocket, client_uid)
+        )
+        self.idle_schedulers[client_uid].start()
 
         self.chat_group_manager.client_group_map[client_uid] = ""
         await self.send_group_update(websocket, client_uid)
@@ -302,6 +314,10 @@ class WebSocketHandler:
         self.client_connections.pop(client_uid, None)
         self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
+        
+        if client_uid in self.idle_schedulers:
+            self.idle_schedulers[client_uid].stop()
+            self.idle_schedulers.pop(client_uid, None)
         if client_uid in self.current_conversation_tasks:
             task = self.current_conversation_tasks[client_uid]
             if task and not task.done():
@@ -322,6 +338,10 @@ class WebSocketHandler:
         self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
         self.chat_group_manager.client_group_map.pop(client_uid, None)
+
+        if client_uid in self.idle_schedulers:
+            self.idle_schedulers[client_uid].stop()
+            self.idle_schedulers.pop(client_uid, None)
 
         if client_uid in self.current_conversation_tasks:
             task = self.current_conversation_tasks[client_uid]
@@ -516,6 +536,35 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """Handle triggers that start a conversation"""
+        
+        # intercept for donation testing
+        if data.get("type") == "text-input":
+            text = data.get("text", "").strip()
+            if text.startswith("/donate"):
+                parts = text.split(" ", 2)
+                amount = 5000
+                message = ""
+                if len(parts) >= 2:
+                    try:
+                        amount = int(parts[1])
+                    except ValueError:
+                        pass
+                if len(parts) >= 3:
+                    message = parts[2]
+                
+                # Reform data as donation event and call the event trigger
+                donation_data = {
+                    "type": "donation",
+                    "viewer_name": "TestUser",
+                    "amount": amount,
+                    "currency": "KRW",
+                    "message": message
+                }
+                return await self._handle_event_trigger(websocket, client_uid, donation_data)
+
+        if client_uid in self.idle_schedulers:
+            self.idle_schedulers[client_uid].update_activity()
+
         await handle_conversation_trigger(
             msg_type=data.get("type", ""),
             data=data,
@@ -529,6 +578,60 @@ class WebSocketHandler:
             current_conversation_tasks=self.current_conversation_tasks,
             broadcast_to_group=self.broadcast_to_group,
         )
+
+    async def _handle_event_trigger(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle incoming events like donations"""
+        logger.info(f"Event received: {data.get('type')}")
+        
+        if client_uid in self.idle_schedulers:
+            self.idle_schedulers[client_uid].update_activity()
+        
+        # 1. Send interrupt signal to frontend to stop speaking immediately
+        await websocket.send_text(
+            json.dumps({"type": "control", "text": "interrupt"})
+        )
+        
+        # 2. Cancel current generation tasks
+        context = self.client_contexts[client_uid]
+        group = self.chat_group_manager.get_client_group(client_uid)
+
+        if group and len(group.members) > 1:
+            await handle_group_interrupt(
+                group_id=group.group_id,
+                heard_response="",
+                current_conversation_tasks=self.current_conversation_tasks,
+                chat_group_manager=self.chat_group_manager,
+                client_contexts=self.client_contexts,
+                broadcast_to_group=self.broadcast_to_group,
+            )
+        else:
+            await handle_individual_interrupt(
+                client_uid=client_uid,
+                current_conversation_tasks=self.current_conversation_tasks,
+                context=context,
+                heard_response="",
+            )
+
+        # 3. Route event to the handler
+        event_type = data.get("type", "")
+        await event_router.route_event(
+            event_type=event_type,
+            data=data,
+            client_uid=client_uid,
+            context=context,
+            websocket=websocket,
+            client_contexts=self.client_contexts,
+            client_connections=self.client_connections,
+            chat_group_manager=self.chat_group_manager,
+            current_conversation_tasks=self.current_conversation_tasks,
+            broadcast_to_group=self.broadcast_to_group,
+        )
+
+    async def _trigger_idle_event(self, websocket: WebSocket, client_uid: str):
+        data = {"type": "idle"}
+        await self._handle_event_trigger(websocket, client_uid, data)
 
     async def _handle_fetch_configs(
         self, websocket: WebSocket, client_uid: str, data: WSMessage

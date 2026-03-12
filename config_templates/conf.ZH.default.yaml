@@ -26,6 +26,10 @@ system_config:
     # speakable_prompt: 'speakable_prompt'
     # 额外指导 LLM 如何使用工具的提示词
     # tool_guidance_prompt: 'tool_guidance_prompt' 
+    # 启用空闲聊天模式时的提示词
+    idle_question_prompt: 'idle_question_prompt'
+    idle_observation_prompt: 'idle_observation_prompt'
+    idle_tease_prompt: 'idle_tease_prompt'
 
 # 默认角色的配置
 character_config:
@@ -462,6 +466,13 @@ character_config:
       required_hits: 3 # 连续命中次数以确认语音
       required_misses: 24 # 连续未命中次数以确认静音
       smoothing_window: 5 # 语音活动检测的平滑窗口大小
+
+  idle_talk_config:
+    enabled: True
+    min_delay: 40
+    max_delay: 90
+    cooldown: 120
+    probability: 0.7
 
   tts_preprocessor_config:
     # 关于进入 TTS 的文本预处理的设置
